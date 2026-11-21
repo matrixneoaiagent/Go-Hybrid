@@ -69,10 +69,29 @@ fn bug2_make_slice_types() {
 
 #[test]
 fn map_literal_zero_value_is_direct_composite() {
-    // The corpus spells empty maps as `map[string]int{}` (the parser surface
-    // has no `make(map…)` encoding — maps are composite literals).
+    // The corpus spells empty maps as `map[string]int{}`. The brace-free map
+    // TYPE form (`make(map[K]V[, n])`, `new(map[K]V)`) is #4578; both encode
+    // to an empty MapLit and must still emit ordinary Go.
     let go = emit("fn main() {\n    m := map[string]int{}\n}");
     assert!(go.contains("m := map[string]int{}"), ":\n{}", go);
+}
+
+#[test]
+fn make_and_new_map_type_without_braces_emit_ordinary_go_4578() {
+    let go = emit(
+        "fn main() {\n    a := make(map[string]int)\n    b := make(map[string]int, 8)\n    c := new(map[string]int)\n    _ = a\n    _ = b\n    _ = c\n}\n",
+    );
+    assert!(go.contains("a := make(map[string]int)"), ":\n{}", go);
+    assert!(go.contains("b := make(map[string]int, 8)"), ":\n{}", go);
+    // `new(map[K]V)` keeps the N5 zero-value lowering the issue names as the
+    // existing equivalent: a pointer to an ALLOCATED empty map, not `new(map…)`
+    // (whose pointee would be nil and first-write-panic under N5).
+    assert!(go.contains("c := &map[string]int{}"), ":\n{}", go);
+    assert!(
+        !go.contains("make(map[string]int{}"),
+        "the type argument must not be rendered as a value literal:\n{}",
+        go
+    );
 }
 
 // ---------------------------------------------------------------------------

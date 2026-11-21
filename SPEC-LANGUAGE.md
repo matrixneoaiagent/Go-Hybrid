@@ -486,8 +486,10 @@ the last element; panics with `HY-PANIC/pop-empty` on empty — example 08). Zer
 observable in Hybrid (N4). Slices are GC values; reads of elements are
 copies (O9); a slice passed to a call is a call-scoped view (O3).
 
-**T8 — Maps `map[K]V`.** GC hash maps, Go semantics for iteration order
-(unspecified), `delete`, comma-ok read (`v, ok := m[k]`), `len`. Zero value
+**T8 — Maps `map[K]V`.** GC hash maps with Go semantics: `make(map[K]V)` and
+`make(map[K]V, n)` (size hint) construct them — the bare map type in that
+operand position is encoded as the empty literal (#4578) — plus `delete`,
+comma-ok read (`v, ok := m[k]`) and `len`; iteration order is unspecified. Zero value
 is the **empty map** and first-write auto-allocates (`var m map[string]int`
 then `m["a"] = 1` works — a deliberate divergence from Go's nil-map panic,
 recorded in N5). **Map-slot borrows** `n := &m[k]` are legal loans (O8) —

@@ -202,6 +202,25 @@ fn new_and_make_take_a_type_as_their_first_argument() {
 }
 
 #[test]
+fn make_new_accept_map_type_without_braces_4578() {
+    // #4578: a map TYPE in make/new's type argument position is a type-as-value
+    // operand. `make(map[K]V)`, `make(map[K]V, n)` and `new(map[K]V)` must be
+    // accepted with 0 diagnostics — the parse layer used to fail closed on the
+    // missing `{` before the checker ever saw them.
+    assert_ok("fn main() {\n    m := make(map[string]int)\n    m[\"a\"] = 1\n    fmt.println(\"{m[\"a\"]}\")\n}\n");
+    assert_ok("fn main() {\n    m := make(map[string]int, 8)\n    m[\"a\"] = 1\n    fmt.println(\"{len(m)}\")\n}\n");
+    assert_ok("fn main() {\n    p := new(map[string]int)\n    _ = p\n    fmt.println(\"ok\")\n}\n");
+    // The pre-existing empty-literal spelling of the same type argument stays
+    // accepted.
+    assert_ok("fn main() {\n    m := make(map[string]int{})\n    fmt.println(\"{len(m)}\")\n}\n");
+    // Negative: once the type parses, a map make still takes 1 or 2 arguments.
+    assert_code(
+        "fn main() {\n    m := make(map[string]int, 8, 9)\n    fmt.println(\"{len(m)}\")\n}\n",
+        "HYB-E2005",
+    );
+}
+
+#[test]
 fn struct_literal_stays_accepted() {
     assert_ok(&format!(
         "{HOLDER}fn main() {{\n    h := holder{{n: 1}}\n    fmt.println(\"{{h.n}}\")\n}}\n"

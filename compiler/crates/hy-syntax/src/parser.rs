@@ -29,8 +29,10 @@
 //!     future surface, gated on real newline-aware label grammar).
 //!   * `..=` inclusive ranges (spike-6 04)      → `ForKind::Range{inclusive: true}`
 //!     (representable since the MVP-0 emitter batch).
-//!   * type-as-value (`make(chan bool, n)`)     → empty literal of the type
-//!     (`StructLit{ty: Some(chan bool), fields: []}` / `SliceLit{elem: Some(T)}`).
+//!   * type-as-value (`make(chan bool, n)`,
+//!     `make(map[string]int, 8)`)               → empty literal of the type
+//!     (`StructLit{ty: Some(chan bool), fields: []}` / `SliceLit{elem: Some(T)}`
+//!     / `MapLit{entries: []}`).
 //!   * fn-literal params with inferred types    → `TypeExpr::Named{name: ""}`.
 //!   * associated functions (`fn greeting.build`) carry a dotted `name`,
 //!     `receiver: None` (methods use `Receiver`).
@@ -2171,12 +2173,26 @@ impl Parser {
         }
     }
 
-    /// `map[K]V{…}` — the operand `map` and `[` are already consumed.
+    /// `map[K]V{…}` — or the brace-free type-as-value form `map[K]V`
+    /// (`make(map[K]V)`, `make(map[K]V, n)`, `new(map[K]V)`, #4578). The
+    /// operand `map` and `[` are already consumed.
     fn parse_map_lit(&mut self, start: usize) -> PResult<Expr> {
         self.bump(); // [
         let key = Box::new(self.parse_type()?);
         self.expect_punct("]")?;
         let value = Box::new(self.parse_type()?);
+        // Type-as-value: no `{` follows, so this is a map type in operand
+        // position. Encode it as the empty `MapLit` — the same encoding
+        // `chan T` (`StructLit`) and `[]T` (`SliceLit`) already use, and the
+        // one `make`/`new` already treat as a type argument (#4578).
+        if !self.at_punct("{") {
+            return Ok(Expr::MapLit {
+                key,
+                value,
+                entries: Vec::new(),
+                span: self.span_from(start),
+            });
+        }
         self.expect_punct("{")?;
         let mut entries = Vec::new();
         while !self.at_punct("}") && !self.at_eof() {
@@ -3307,6 +3323,90 @@ mod tests {
                 );
             }
             _ => panic!("local"),
+        }
+    }
+
+    #[test]
+    fn map_type_as_value_without_braces_4578() {
+        // #4578: `map[K]V` in operand position was hard-wired to the literal
+        // production, so `make(map[string]int)` / `make(map[string]int, 8)` /
+        // `new(map[string]int)` died with "expected `{`". The brace-free form
+        // is the map arm of the type-as-value encoding (as `chan T` and `[]T`
+        // already are): an empty `MapLit`.
+        let f = parse_src(
+            "fn main() { a := make(map[string]int) b := make(map[string]int, 8) c := new(map[string]int) }",
+        );
+        let body = &f.fns().next().unwrap().body.as_ref().unwrap().stmts;
+        for (i, want_args) in [(0, 1), (1, 2), (2, 1)] {
+            let Stmt::Local(LocalDecl { values, .. }) = &body[i] else {
+                panic!("local")
+            };
+            let Expr::Call { args, .. } = &values[0] else {
+                panic!("call")
+            };
+            assert_eq!(args.len(), want_args, "arg count for stmt {i}");
+            match &args[0].value {
+                Expr::MapLit {
+                    key,
+                    value,
+                    entries,
+                    ..
+                } => {
+                    assert!(entries.is_empty(), "type-as-value has no entries");
+                    assert!(matches!(key.as_ref(), TypeExpr::Named { name, .. } if name == "string"));
+                    assert!(matches!(value.as_ref(), TypeExpr::Named { name, .. } if name == "int"));
+                }
+                e => panic!("map type-as-value, got {}", e.render()),
+            }
+        }
+        // The size hint is an ordinary second argument, not part of the type.
+        let Stmt::Local(LocalDecl { values, .. }) = &body[1] else {
+            panic!("local")
+        };
+        let Expr::Call { args, .. } = &values[0] else {
+            panic!("call")
+        };
+        assert!(
+            matches!(&args[1].value, Expr::Lit { kind: LitKind::Int(s), .. } if s == "8"),
+            "size hint"
+        );
+    }
+
+    #[test]
+    fn map_literal_with_braces_is_unchanged_4578() {
+        // The brace-free acceptance must not disturb the literal production:
+        // `map[K]V{}` (the corpus's empty-map spelling) and a populated
+        // literal still parse exactly as before.
+        let f = parse_src(
+            r#"fn main() { a := map[string]int{} b := map[string]int{"x": 1} }"#,
+        );
+        let body = &f.fns().next().unwrap().body.as_ref().unwrap().stmts;
+        assert!(
+            matches!(&body[0], Stmt::Local(LocalDecl { values, .. }) if matches!(&values[0], Expr::MapLit { entries, .. } if entries.is_empty()))
+        );
+        assert!(
+            matches!(&body[1], Stmt::Local(LocalDecl { values, .. }) if matches!(&values[0], Expr::MapLit { entries, .. } if entries.len() == 1))
+        );
+    }
+
+    #[test]
+    fn malformed_map_type_still_fails_4578() {
+        // Negative control: accepting the brace-free form must not turn a
+        // malformed map TYPE into a silent accept.
+        for src in [
+            "fn main() { m := make(map[string]) }",
+            "fn main() { m := make(map[]) }",
+            "fn main() { m := make(map[string]int }",
+        ] {
+            let errs = match parse_file("t.hy", src) {
+                Ok(_) => panic!("malformed map type must fail to parse: {src}"),
+                Err(d) => d,
+            };
+            assert!(
+                errs.iter().any(|d| d.code == PARSE_ERR_CODE),
+                "expected HYB-E0002 for {src}: {:?}",
+                errs
+            );
         }
     }
 
